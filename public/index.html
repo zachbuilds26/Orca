@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Orca turns plain-English crypto rules into Telegram-managed testnet intents on X Layer."
+    />
+    <title>Orca — Telegram-native crypto intent agent</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@400;500;600;700;800&family=Space+Grotesk:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="page">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark">Orca</div>
+          <div class="brand-copy">Telegram-native crypto intent agent</div>
+        </div>
+        <a class="topbar-pill" data-bot-state href="#telegram">Setup pending</a>
+      </header>
+
+      <main>
+        <section class="hero">
+          <div class="hero-copy">
+            <div class="eyebrow">X Layer testnet · Chain <span data-chain>1952</span></div>
+            <h1>Speak a rule.<br />Orca executes it.</h1>
+            <p class="lede">
+              Orca turns a sentence into a Telegram-managed intent, verifies the user’s wallet,
+              watches the live OKB price, and sends a sponsored X Layer testnet transfer when the trigger hits.
+            </p>
+            <p class="live-price">
+              Live OKB price <strong data-live-price>loading…</strong>
+            </p>
+            <div class="cta-row">
+              <a class="button button-primary" data-orca-cta href="#telegram">Start in Telegram</a>
+              <a class="button button-secondary" data-wallet-cta href="#telegram">Connect wallet</a>
+              <a class="button button-secondary" href="#how-it-works">See the flow</a>
+            </div>
+            <div class="meta-strip">
+              <span>One token</span>
+              <span>Live price feed</span>
+              <span>Real tx hash</span>
+            </div>
+          </div>
+
+          <div class="hero-panel">
+            <div class="panel-card intent-card">
+              <div class="card-label">Sample intent</div>
+              <div class="intent-line">
+                <span>Buy</span>
+                <strong>$10 of OKB</strong>
+              </div>
+              <div class="intent-line">
+                <span>Trigger</span>
+                <strong>below target</strong>
+              </div>
+              <div class="intent-line">
+                <span>Settlement</span>
+                <strong>real X Layer tx</strong>
+              </div>
+              <div class="intent-status">Watching live price</div>
+            </div>
+
+            <div class="panel-card">
+              <div class="card-label">Telegram flow</div>
+              <div class="chat-bubble user">Buy $10 of OKB if it drops below my target.</div>
+              <div class="chat-bubble bot">Connect and verify your wallet once. Then I’ll use it automatically for every testnet intent.</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="section" id="how-it-works">
+          <div class="section-head">
+            <h2>How it works</h2>
+            <p>One narrow flow: capture the rule, confirm the address, and execute on testnet when the market hits.</p>
+          </div>
+          <div class="cards cards-three">
+            <article class="info-card">
+              <span class="step">01</span>
+              <h3>Type the rule</h3>
+              <p>A plain sentence becomes a structured buy intent with amount, trigger, and expiry.</p>
+            </article>
+            <article class="info-card">
+              <span class="step">02</span>
+              <h3>Connect your wallet</h3>
+              <p>In the Telegram Mini App, connect an EVM wallet, switch to X Layer testnet, and sign once to verify ownership.</p>
+            </article>
+            <article class="info-card">
+              <span class="step">03</span>
+              <h3>Watch live execution</h3>
+              <p>The bot checks the live OKB price and sends a sponsored OKB testnet transfer to the verified wallet when the trigger hits.</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="section split-section" id="why">
+          <div class="section-head">
+            <h2>Why this version works</h2>
+            <p>It feels useful immediately, but the actual output is a transaction hash, not a fake demo state.</p>
+          </div>
+          <div class="cards cards-two">
+            <article class="info-card">
+              <h3>Rare enough</h3>
+              <p>Not a wallet, not a trading terminal, not a generic chatbot. It is a command layer for a single market action.</p>
+            </article>
+            <article class="info-card">
+              <h3>Demo friendly</h3>
+              <p>The full flow fits on one page and one Telegram thread, which makes the live path easy to present under pressure.</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="section telegram-section" id="telegram">
+          <div class="section-head">
+            <h2>Telegram is the app</h2>
+            <p>The landing page sells the idea. Telegram captures the rule, shows the preview, and handles the live status.</p>
+          </div>
+          <div class="telegram-grid">
+            <div class="telegram-panel">
+              <h3>What the bot handles</h3>
+              <ul>
+                <li>Natural-language order capture</li>
+                <li>Address confirmation and rule preview</li>
+                <li>Live price watcher and execution notices</li>
+                <li>X Layer testnet settlement and receipt</li>
+              </ul>
+            </div>
+            <div class="telegram-panel">
+              <h3>Build guardrails</h3>
+              <ul>
+                <li>One token first: OKB</li>
+                <li>One trigger first: buy below price</li>
+                <li>Testnet only on chain 1952</li>
+                <li>One real onchain transfer per intent</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer class="footer">Testnet only. Built for a clean path from sentence to execution.</footer>
+    </div>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

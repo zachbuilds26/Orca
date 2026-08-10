@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#07131b" />
+    <title>Orca wallet</title>
+    <link rel="stylesheet" href="/wallet.css" />
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  </head>
+  <body>
+    <main class="wallet-app" aria-live="polite">
+      <header class="wallet-header">
+        <span class="brand-mark">Orca</span>
+        <span class="network-chip">X Layer testnet · 1952</span>
+      </header>
+
+      <section class="wallet-card">
+        <p class="eyebrow">Verified wallet</p>
+        <h1>Connect once.<br />Use your wallet everywhere.</h1>
+        <p class="lede" data-wallet-copy>Checking your secure Telegram session…</p>
+
+        <div class="wallet-state" data-wallet-state>
+          <span class="state-dot"></span>
+          <span data-wallet-state-text>Connecting to Orca</span>
+        </div>
+
+        <div class="wallet-address" data-wallet-address hidden></div>
+
+        <div class="actions">
+          <button class="button button-primary" type="button" data-connect-wallet disabled>Connect wallet</button>
+          <button class="button button-secondary" type="button" data-unlink-wallet hidden>Disconnect wallet</button>
+        </div>
+
+        <p class="notice">
+          You will sign a one-time ownership message. It is not a transaction, does not share your private key, and does not grant Orca permission to spend from your wallet.
+        </p>
+      </section>
+
+      <section class="info-card">
+        <h2>What connection means</h2>
+        <ul>
+          <li>Your verified address becomes Orca’s testnet transfer recipient.</li>
+          <li>Orca still uses its own funded testnet execution wallet.</li>
+          <li>You can disconnect at any time; live intents tied to this wallet are paused.</li>
+        </ul>
+      </section>
+    </main>
+
+    <script type="module" src="/assets/wallet-app.js"></script>
+  </body>
+</html>

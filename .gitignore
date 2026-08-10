@@ -1,0 +1,5 @@
+node_modules
+.env
+.DS_Store
+# Runtime-only user data: Telegram sessions, linked wallets, intents, and price history.
+data/orca-store.json
