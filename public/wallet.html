@@ -3,71 +3,137 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#07131b" />
+    <meta name="theme-color" content="#f4f4f1" />
     <title>Orca wallet</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Syne:wght@500;600;700;800&family=Space+Grotesk:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
     <link rel="stylesheet" href="/wallet.css" />
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
   </head>
   <body>
     <main class="wallet-app" aria-live="polite">
       <header class="wallet-header">
-        <span class="brand-mark">Orca</span>
-        <span class="network-chip">X Layer testnet · 1952</span>
+        <a class="brand" href="/" aria-label="Orca home">
+          <span class="brand-mark">Orca</span>
+          <span class="brand-copy">Telegram-native wallet verification</span>
+        </a>
+        <div class="wallet-header-meta">
+          <span class="wallet-meta-label">X Layer testnet</span>
+          <span class="wallet-network-chip">1952</span>
+          <span class="wallet-session-chip">Secure session</span>
+        </div>
       </header>
 
-      <section class="wallet-card">
-        <p class="eyebrow">Verified wallet</p>
-        <h1>Connect once.<br />Use your wallet anywhere.</h1>
-        <p class="lede" data-wallet-copy>Checking your secure session…</p>
+      <section class="wallet-grid" aria-labelledby="wallet-title">
+        <article class="wallet-intro">
+          <p class="eyebrow">Verified wallet</p>
+          <h1 id="wallet-title">One verified address. Every intent.</h1>
+          <p class="lede" data-wallet-copy>Checking your secure session…</p>
 
-        <div class="browser-access" data-browser-access hidden>
-          <form class="browser-form" data-browser-form>
-            <label for="browser-code">Browser access code</label>
-            <div class="browser-row">
-              <input
-                id="browser-code"
-                data-browser-code
-                type="text"
-                placeholder="Paste the code from Telegram"
-                autocomplete="one-time-code"
-                inputmode="text"
-                spellcheck="false"
-              />
-              <button class="button button-secondary browser-submit" type="submit" data-browser-submit>
-                Open browser session
-              </button>
+          <div class="wallet-points">
+            <div class="wallet-point">
+              <span class="wallet-note-index">01</span>
+              <div>
+                <h3>Own the address</h3>
+                <p>Your verified EVM wallet becomes Orca’s receiving address on X Layer testnet.</p>
+              </div>
             </div>
-          </form>
-          <p class="browser-hint" data-browser-hint>
-            Open /wallet in Telegram to get a one-time browser code.
+            <div class="wallet-point">
+              <span class="wallet-note-index">02</span>
+              <div>
+                <h3>Sign once</h3>
+                <p>Telegram or a browser handoff verifies the wallet without sharing your private key.</p>
+              </div>
+            </div>
+            <div class="wallet-point">
+              <span class="wallet-note-index">03</span>
+              <div>
+                <h3>Use it everywhere</h3>
+                <p>New intents reuse the same verified address until you disconnect or replace it.</p>
+              </div>
+            </div>
+          </div>
+        </article>
+
+        <article class="wallet-card">
+          <div class="card-label">Connection</div>
+
+          <div class="browser-access" data-browser-access hidden>
+            <form class="browser-form" data-browser-form>
+              <label for="browser-code">Browser access code</label>
+              <div class="browser-row">
+                <input
+                  id="browser-code"
+                  data-browser-code
+                  type="text"
+                  placeholder="Paste the code from Telegram"
+                  autocomplete="one-time-code"
+                  inputmode="text"
+                  spellcheck="false"
+                />
+                <button class="button button-secondary browser-submit" type="submit" data-browser-submit>
+                  Open browser session
+                </button>
+              </div>
+            </form>
+            <p class="browser-hint" data-browser-hint>Open /wallet in Telegram to get a one-time browser code.</p>
+          </div>
+
+          <div class="wallet-state" data-wallet-state>
+            <span class="state-dot"></span>
+            <span data-wallet-state-text>Connecting to Orca</span>
+          </div>
+
+          <div class="wallet-address" data-wallet-address hidden></div>
+
+          <div class="actions">
+            <button class="button button-primary" type="button" data-connect-wallet disabled>Connect wallet</button>
+            <button class="button button-secondary" type="button" data-unlink-wallet hidden>Disconnect wallet</button>
+          </div>
+
+          <p class="notice">
+            You will sign a one-time ownership message. It is not a transaction, does not share your private key, and does
+            not grant Orca permission to spend from your wallet.
+          </p>
+        </article>
+      </section>
+
+      <section class="wallet-info" aria-labelledby="wallet-info-title">
+        <div class="section-head">
+          <p class="section-kicker">What connection means</p>
+          <h2 id="wallet-info-title">The verified address stays in control.</h2>
+          <p>
+            The wallet screen keeps the session narrow: verify the address, reuse it for intents, and disconnect whenever you
+            want.
           </p>
         </div>
 
-        <div class="wallet-state" data-wallet-state>
-          <span class="state-dot"></span>
-          <span data-wallet-state-text>Connecting to Orca</span>
+        <div class="wallet-note-grid">
+          <article class="wallet-note">
+            <span class="wallet-note-index">01</span>
+            <h3>Recipient address</h3>
+            <p>Your verified address becomes Orca’s testnet transfer recipient.</p>
+          </article>
+          <article class="wallet-note">
+            <span class="wallet-note-index">02</span>
+            <h3>Browser handoff</h3>
+            <p>Desktop browsers and mobile wallet browsers can use the same one-time code.</p>
+          </article>
+          <article class="wallet-note">
+            <span class="wallet-note-index">03</span>
+            <h3>Execution wallet</h3>
+            <p>Orca still uses its own funded testnet execution wallet for sponsored settlement.</p>
+          </article>
+          <article class="wallet-note">
+            <span class="wallet-note-index">04</span>
+            <h3>Disconnect behavior</h3>
+            <p>You can disconnect at any time, and live intents tied to this wallet are paused.</p>
+          </article>
         </div>
-
-        <div class="wallet-address" data-wallet-address hidden></div>
-
-        <div class="actions">
-          <button class="button button-primary" type="button" data-connect-wallet disabled>Connect wallet</button>
-          <button class="button button-secondary" type="button" data-unlink-wallet hidden>Disconnect wallet</button>
-        </div>
-
-        <p class="notice">
-          You will sign a one-time ownership message. It is not a transaction, does not share your private key, and does not grant Orca permission to spend from your wallet.
-        </p>
-      </section>
-
-      <section class="info-card">
-        <h2>What connection means</h2>
-        <ul>
-          <li>Your verified address becomes Orca’s testnet transfer recipient.</li>
-          <li>Desktop browsers and mobile wallet browsers can use the same one-time code.</li>
-          <li>Orca still uses its own funded testnet execution wallet.</li>
-          <li>You can disconnect at any time; live intents tied to this wallet are paused.</li>
-        </ul>
       </section>
     </main>
 
