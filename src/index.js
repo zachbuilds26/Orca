@@ -9,6 +9,13 @@ import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from
 import sharp from 'sharp';
 import { ethers } from 'ethers';
 import { Markup, Telegraf } from 'telegraf';
+import {
+  GroqRequestError,
+  GroqTimeoutError,
+  GroqValidationError,
+  classifyFallbackMessage,
+  createGroqClient,
+} from './groq.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -37,6 +44,18 @@ const TELEGRAM_INIT_DATA_MAX_AGE_SECONDS = Number(process.env.TELEGRAM_INIT_DATA
 const WEB_SESSION_TTL_SECONDS = Number(process.env.ORCA_WEB_SESSION_TTL_SECONDS || 1800);
 const WALLET_NONCE_TTL_SECONDS = Number(process.env.ORCA_WALLET_NONCE_TTL_SECONDS || 300);
 const MAX_OPEN_INTENTS_PER_USER = Number(process.env.MAX_OPEN_INTENTS_PER_USER || 3);
+const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
+const GROQ_MODEL = process.env.GROQ_MODEL || '';
+const GROQ_TIMEOUT_MS = normalizePositiveInteger(process.env.GROQ_TIMEOUT_MS, 4500);
+const GROQ_MAX_INPUT_CHARS = normalizePositiveInteger(process.env.GROQ_MAX_INPUT_CHARS, 1200);
+const GROQ_REQUESTS_PER_MINUTE = normalizePositiveInteger(process.env.GROQ_REQUESTS_PER_MINUTE, 30);
+const groqClient = createGroqClient({
+  apiKey: GROQ_API_KEY,
+  model: GROQ_MODEL || undefined,
+  timeoutMs: GROQ_TIMEOUT_MS,
+  maxInputChars: GROQ_MAX_INPUT_CHARS,
+});
+const groqRequestWindow = { startedAt: 0, count: 0 };
 const MINI_APP_SESSION_COOKIE = 'orca_mini_session';
 const BROWSER_SESSION_COOKIE = 'orca_browser_session';
 const IS_PRODUCTION = APP_ORIGIN.startsWith('https://');
@@ -323,6 +342,8 @@ app.get('/api/config', (_, res) => {
     botUsername: BOT_USERNAME,
     telegramReady: botReady,
     executionReady: Boolean(executionWallet),
+    groqReady: groqClient.enabled,
+    groqModel: GROQ_MODEL || null,
     executionAddress: executionWallet?.address || null,
     currentPrice: priceSnapshot.price,
     currentPriceLabel: priceSnapshot.price ? usdFormatter.format(priceSnapshot.price) : null,
@@ -359,6 +380,8 @@ app.get('/health', (_, res) => {
     ok: true,
     telegramReady: botReady,
     executionReady: Boolean(executionWallet),
+    groqReady: groqClient.enabled,
+    groqModel: GROQ_MODEL || null,
     liveIntents: getLiveIntents().length,
   });
 });
@@ -536,31 +559,7 @@ async function startTelegramBot() {
       return;
     }
 
-    const draft = createDraftFromText(text, binding);
-
-    if (!draft.triggerPrice && !draft.recurring) {
-      session.step = 'awaiting_trigger';
-      session.draft = draft;
-      session.updatedAt = nowIso();
-      await persistStore();
-      await ctx.reply('What price should trigger this rule? Send just the number, like 45.');
-      return;
-    }
-
-    if (!binding) {
-      session.step = 'awaiting_wallet_link';
-      session.draft = draft;
-      session.updatedAt = nowIso();
-      await persistStore();
-      await ctx.reply('Connect and verify your X Layer wallet before you confirm this rule.', await getWalletLinkKeyboard(ctx));
-      return;
-    }
-
-    session.step = 'awaiting_confirm';
-    session.draft = draft;
-    session.updatedAt = nowIso();
-    await persistStore();
-    await sendDraftPreview(ctx, draft);
+    await routeFreeTextMessage(ctx, text, binding, session);
   });
 
   bot.action('orca_new', async (ctx) => {
@@ -2238,6 +2237,7 @@ function renderStartMessage() {
 function renderHelpMessage() {
   return [
     'Orca turns plain English into a live X Layer testnet intent.',
+    'With Groq configured, Orca can also answer plain-language questions and draft rules from a sentence.',
     'Start with /wallet: connect an EVM wallet, switch to X Layer testnet (1952), and sign once to verify ownership. If Telegram opens a browser link instead, paste the one-time code into a wallet browser on desktop or mobile.',
     'Examples: Buy $10 of OKB if it drops below 45. Sell $10 of OKB if it rises above 110. DCA $10 every day.',
     'Orca uses the verified linked wallet as your receiving address. It never receives your private key and the signature does not approve spending from your wallet.',
@@ -2291,6 +2291,139 @@ function applyWalletBindingToDraft(draft, binding) {
     walletBindingVersion: binding.bindingVersion,
     ownerTelegramUserId: binding.telegramUserId,
   };
+}
+
+function normalizePositiveInteger(value, fallback) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return fallback;
+  }
+
+  return Math.floor(numeric);
+}
+
+function allowGroqRequest() {
+  if (!groqClient.enabled) {
+    return false;
+  }
+
+  const now = Date.now();
+  if (!groqRequestWindow.startedAt || now - groqRequestWindow.startedAt >= 60_000) {
+    groqRequestWindow.startedAt = now;
+    groqRequestWindow.count = 0;
+  }
+
+  if (groqRequestWindow.count >= GROQ_REQUESTS_PER_MINUTE) {
+    return false;
+  }
+
+  groqRequestWindow.count += 1;
+  return true;
+}
+
+async function routeFreeTextMessage(ctx, text, binding, session) {
+  const localClassification = classifyFallbackMessage(text, { maxInputChars: GROQ_MAX_INPUT_CHARS });
+
+  if (localClassification?.action === 'info') {
+    await replyToInfoRequest(ctx, localClassification.infoKey);
+    return;
+  }
+
+  if (localClassification?.action === 'draft') {
+    await handleDraftMessage(ctx, session, binding, localClassification.normalizedCommand, localClassification.strategy);
+    return;
+  }
+
+  if (!allowGroqRequest()) {
+    await ctx.reply(renderHelpMessage());
+    return;
+  }
+
+  try {
+    const classification = await groqClient.classifyMessage(text);
+
+    if (classification.action === 'info') {
+      await replyToInfoRequest(ctx, classification.infoKey);
+      return;
+    }
+
+    if (classification.action === 'draft') {
+      await handleDraftMessage(ctx, session, binding, classification.normalizedCommand, classification.strategy);
+      return;
+    }
+
+    if (!allowGroqRequest()) {
+      await ctx.reply(renderHelpMessage());
+      return;
+    }
+
+    const reply = await groqClient.generateChatReply(text);
+    await ctx.reply(reply);
+  } catch (error) {
+    if (error instanceof GroqRequestError || error instanceof GroqTimeoutError || error instanceof GroqValidationError) {
+      console.error('Groq message routing failed', error);
+    } else {
+      console.error('Message routing failed', error);
+    }
+
+    await ctx.reply(renderHelpMessage());
+  }
+}
+
+async function handleDraftMessage(ctx, session, binding, text, forcedStrategyKey = null) {
+  const draft = createDraftFromText(text, binding, forcedStrategyKey);
+
+  if (!draft.triggerPrice && !draft.recurring) {
+    session.step = 'awaiting_trigger';
+    session.draft = draft;
+    session.updatedAt = nowIso();
+    await persistStore();
+    await ctx.reply('What price should trigger this rule? Send just the number, like 45.');
+    return;
+  }
+
+  if (!binding) {
+    session.step = 'awaiting_wallet_link';
+    session.draft = draft;
+    session.updatedAt = nowIso();
+    await persistStore();
+    await ctx.reply('Connect and verify your X Layer wallet before you confirm this rule.', await getWalletLinkKeyboard(ctx));
+    return;
+  }
+
+  session.step = 'awaiting_confirm';
+  session.draft = draft;
+  session.updatedAt = nowIso();
+  await persistStore();
+  await sendDraftPreview(ctx, draft);
+}
+
+async function replyToInfoRequest(ctx, infoKey) {
+  switch (infoKey) {
+    case 'help':
+      await ctx.reply(renderHelpMessage());
+      return;
+    case 'price':
+      await sendPriceCard(ctx, 1);
+      return;
+    case 'chart':
+      await sendPriceCard(ctx, 7);
+      return;
+    case 'list':
+      await ctx.reply(renderListMessage(ctx));
+      return;
+    case 'status':
+      await ctx.reply(renderStatusMessage(ctx));
+      return;
+    case 'positions':
+      await ctx.reply(renderPositionsMessage(ctx));
+      return;
+    case 'risk':
+      await ctx.reply(await renderRiskMessage(ctx));
+      return;
+    default:
+      await ctx.reply(renderHelpMessage());
+  }
 }
 
 function renderPriceMessage() {

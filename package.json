@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "node src/index.js",
     "start": "node src/index.js",
-    "check": "node --check src/index.js",
+    "check": "node --check src/index.js && node --check src/groq.js",
+    "test": "node --test",
     "build:wallet": "esbuild client/wallet-app.js --bundle --format=esm --target=es2022 --outfile=public/assets/wallet-app.js",
     "build": "npm run check && npm run build:wallet"
   },
