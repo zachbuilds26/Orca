@@ -91,6 +91,7 @@ async function finishBoot(mode) {
 
   const wallet = await request('/api/wallet');
   initializeAppKit();
+  bindWalletControls();
 
   browserPanel.hidden = true;
   connectButton.hidden = false;
@@ -272,6 +273,16 @@ function bindBrowserForm() {
     event.preventDefault();
     openBrowserSession(browserCodeInput.value);
   });
+}
+
+function bindWalletControls() {
+  if (connectButton.dataset.bound === 'true') {
+    return;
+  }
+
+  connectButton.dataset.bound = 'true';
+  connectButton.addEventListener('click', connectOrVerify);
+  unlinkButton.addEventListener('click', unlinkWallet);
 }
 
 function setBrowserBusy(isBusy) {
