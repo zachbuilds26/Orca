@@ -7,28 +7,82 @@ const copy = document.querySelector('[data-wallet-copy]');
 const state = document.querySelector('[data-wallet-state]');
 const stateText = document.querySelector('[data-wallet-state-text]');
 const addressNode = document.querySelector('[data-wallet-address]');
+const browserPanel = document.querySelector('[data-browser-access]');
+const browserForm = document.querySelector('[data-browser-form]');
+const browserCodeInput = document.querySelector('[data-browser-code]');
+const browserSubmit = document.querySelector('[data-browser-submit]');
+const browserHint = document.querySelector('[data-browser-hint]');
+
+const browserCodeFromUrl = new URLSearchParams(window.location.search).get('code')?.trim() || '';
 
 let csrfToken = '';
 let config = null;
 let appKit = null;
 let connectedAddress = null;
 
-boot().catch((error) => setError(error.message || 'Unable to start the Orca wallet screen.'));
+boot().catch((error) => showFatalError(error.message || 'Unable to start the Orca wallet screen.'));
 
 async function boot() {
   const telegram = window.Telegram?.WebApp;
-  if (!telegram?.initData) {
-    throw new Error('Open this wallet screen from the Orca Telegram bot.');
+
+  if (telegram?.initData) {
+    telegram.ready();
+    telegram.expand();
+    await openTelegramSession(telegram.initData);
+    return;
   }
 
-  telegram.ready();
-  telegram.expand();
+  showBrowserAccess('Open /wallet in Telegram to get a one-time browser code, or paste one here from the Orca bot.');
+  bindBrowserForm();
 
+  if (browserCodeFromUrl) {
+    browserCodeInput.value = browserCodeFromUrl;
+    await openBrowserSession(browserCodeFromUrl, true);
+  }
+}
+
+async function openTelegramSession(initData) {
+  setState('Authenticating Telegram session…');
   const session = await request('/api/miniapp/session', {
     method: 'POST',
-    body: JSON.stringify({ initData: telegram.initData }),
+    body: JSON.stringify({ initData }),
   });
+
   csrfToken = session.csrfToken;
+  await finishBoot('telegram');
+}
+
+async function openBrowserSession(code, fromUrl = false) {
+  const trimmed = String(code || '').trim();
+  if (!trimmed) {
+    showBrowserAccess('Paste the browser code from Telegram to continue.');
+    return;
+  }
+
+  setBrowserBusy(true);
+  setState('Opening browser session…');
+
+  try {
+    const session = await request('/api/browser/session', {
+      method: 'POST',
+      body: JSON.stringify({ code: trimmed }),
+    });
+
+    csrfToken = session.csrfToken;
+    if (fromUrl) {
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+
+    await finishBoot('browser');
+  } catch (error) {
+    showBrowserAccess(error.message || 'That browser code did not work.');
+    setState(error.message || 'Browser code failed.', 'error');
+  } finally {
+    setBrowserBusy(false);
+  }
+}
+
+async function finishBoot(mode) {
   config = await request('/api/miniapp/config');
 
   if (!config.projectId) {
@@ -36,20 +90,31 @@ async function boot() {
   }
 
   const wallet = await request('/api/wallet');
+  initializeAppKit();
+
+  browserPanel.hidden = true;
+  connectButton.hidden = false;
+  connectButton.disabled = false;
+  unlinkButton.disabled = false;
+  unlinkButton.hidden = !wallet.wallet;
+
   if (wallet.wallet) {
     showLinkedWallet(wallet.wallet);
-  } else {
-    setState('Ready to connect', 'ready');
-    copy.textContent = `Connect an EVM wallet and verify it for X Layer testnet (chain ${config.chainId}).`;
+    return;
   }
 
-  initializeAppKit();
-  connectButton.disabled = false;
-  connectButton.addEventListener('click', connectOrVerify);
-  unlinkButton.addEventListener('click', unlinkWallet);
+  connectButton.textContent = 'Connect wallet';
+  setState(mode === 'browser' ? 'Browser session ready' : 'Ready to connect', 'ready');
+  copy.textContent = mode === 'browser'
+    ? `Open an EVM wallet in your browser, switch to X Layer testnet (chain ${config.chainId}), and verify it once.`
+    : `Connect an EVM wallet and verify it for X Layer testnet (chain ${config.chainId}).`;
 }
 
 function initializeAppKit() {
+  if (appKit) {
+    return;
+  }
+
   const xLayerTestnet = {
     id: config.chainId,
     name: 'X Layer Testnet',
@@ -74,6 +139,7 @@ function initializeAppKit() {
 
   appKit.subscribeAccount((account) => {
     connectedAddress = account?.isConnected ? account.address : null;
+
     if (connectedAddress) {
       connectButton.textContent = 'Verify connected wallet';
       setState(`Wallet connected: ${shortAddress(connectedAddress)}`, 'ready');
@@ -92,6 +158,7 @@ async function connectOrVerify() {
 
     connectButton.disabled = true;
     setState('Switching to X Layer testnet…');
+
     const provider = appKit.getWalletProvider();
     if (!provider?.request) {
       throw new Error('Your wallet provider is unavailable. Reconnect and try again.');
@@ -99,6 +166,7 @@ async function connectOrVerify() {
 
     await ensureXLayerNetwork(provider);
     setState('Preparing secure ownership message…');
+
     const nonce = await request('/api/wallet/link-nonce', {
       method: 'POST',
       headers: { 'x-orca-csrf': csrfToken },
@@ -117,6 +185,7 @@ async function connectOrVerify() {
       headers: { 'x-orca-csrf': csrfToken },
       body: JSON.stringify({ nonceId: nonce.nonceId, address: connectedAddress, signature }),
     });
+
     showLinkedWallet(linked.wallet);
     window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred('success');
   } catch (error) {
@@ -160,7 +229,7 @@ async function unlinkWallet() {
     addressNode.hidden = true;
     unlinkButton.hidden = true;
     connectButton.hidden = false;
-    connectButton.textContent = connectedAddress ? 'Verify connected wallet' : 'Connect wallet';
+    connectButton.textContent = 'Connect wallet';
     copy.textContent = `Connect an EVM wallet and verify it for X Layer testnet (chain ${config.chainId}).`;
     setState('Wallet disconnected', 'ready');
     window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred('success');
@@ -176,8 +245,39 @@ function showLinkedWallet(wallet) {
   addressNode.hidden = false;
   connectButton.hidden = true;
   unlinkButton.hidden = false;
-  copy.textContent = 'This wallet is verified for Orca. New Telegram intents will use it as their X Layer testnet receiving address.';
+  browserPanel.hidden = true;
+  copy.textContent = 'This wallet is verified for Orca. New Telegram or browser sessions will use it as the X Layer testnet receiving address.';
   setState(`Verified on X Layer testnet · ${shortAddress(wallet.address)}`, 'ready');
+}
+
+function showBrowserAccess(message) {
+  browserPanel.hidden = false;
+  connectButton.hidden = true;
+  unlinkButton.hidden = true;
+  browserSubmit.disabled = false;
+  browserCodeInput.disabled = false;
+  browserHint.textContent = message;
+  copy.textContent = 'Desktop browsers and mobile wallet browsers can use the same one-time code from Telegram.';
+  setState('Browser code required', 'ready');
+  browserCodeInput.focus();
+}
+
+function bindBrowserForm() {
+  if (browserForm.dataset.bound === 'true') {
+    return;
+  }
+
+  browserForm.dataset.bound = 'true';
+  browserForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+    openBrowserSession(browserCodeInput.value);
+  });
+}
+
+function setBrowserBusy(isBusy) {
+  browserCodeInput.disabled = isBusy;
+  browserSubmit.disabled = isBusy;
+  browserSubmit.textContent = isBusy ? 'Opening…' : 'Open browser session';
 }
 
 async function request(url, options = {}) {
@@ -204,6 +304,12 @@ function setState(message, variant = '') {
 function setError(message) {
   setState(message, 'error');
   copy.textContent = 'Return to the Orca bot, reopen /wallet, and try again.';
+  connectButton.disabled = true;
+}
+
+function showFatalError(message) {
+  showBrowserAccess(message);
+  setState(message, 'error');
   connectButton.disabled = true;
 }
 

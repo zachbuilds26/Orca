@@ -31,7 +31,11 @@ async function loadConfig() {
       cta.removeAttribute('rel');
     }
 
-    if (config.botUrl && walletCta) {
+    if (config.browserWalletUrl && walletCta) {
+      walletCta.href = config.browserWalletUrl;
+      walletCta.target = '_blank';
+      walletCta.rel = 'noreferrer';
+    } else if (config.botUrl && walletCta) {
       walletCta.href = `${config.botUrl}?start=wallet`;
       walletCta.target = '_blank';
       walletCta.rel = 'noreferrer';

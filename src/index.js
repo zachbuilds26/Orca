@@ -37,6 +37,8 @@ const TELEGRAM_INIT_DATA_MAX_AGE_SECONDS = Number(process.env.TELEGRAM_INIT_DATA
 const WEB_SESSION_TTL_SECONDS = Number(process.env.ORCA_WEB_SESSION_TTL_SECONDS || 1800);
 const WALLET_NONCE_TTL_SECONDS = Number(process.env.ORCA_WALLET_NONCE_TTL_SECONDS || 300);
 const MAX_OPEN_INTENTS_PER_USER = Number(process.env.MAX_OPEN_INTENTS_PER_USER || 3);
+const MINI_APP_SESSION_COOKIE = 'orca_mini_session';
+const BROWSER_SESSION_COOKIE = 'orca_browser_session';
 const IS_PRODUCTION = APP_ORIGIN.startsWith('https://');
 const TELEGRAM_COMMANDS = [
   { command: 'start', description: 'Open Orca' },
@@ -185,7 +187,7 @@ app.post('/api/miniapp/session', miniAppRateLimit, async (req, res) => {
     const session = createWebSession(telegramUser);
     await persistStore();
 
-    res.cookie('orca_mini_session', session.token, {
+    res.cookie(MINI_APP_SESSION_COOKIE, session.token, {
       httpOnly: true,
       secure: IS_PRODUCTION,
       sameSite: 'strict',
@@ -203,7 +205,31 @@ app.post('/api/miniapp/session', miniAppRateLimit, async (req, res) => {
   }
 });
 
-app.get('/api/miniapp/config', requireMiniAppSession, (req, res) => {
+app.post('/api/browser/session', miniAppRateLimit, async (req, res) => {
+  try {
+    const launch = verifyBrowserLaunchCode(req.body?.code);
+    const session = createWebSession({ id: launch.userId, first_name: launch.firstName }, launch.chatId);
+    await persistStore();
+
+    res.cookie(BROWSER_SESSION_COOKIE, session.token, {
+      httpOnly: true,
+      secure: IS_PRODUCTION,
+      sameSite: 'strict',
+      maxAge: WEB_SESSION_TTL_SECONDS * 1000,
+      path: '/',
+    });
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      ok: true,
+      csrfToken: session.csrfToken,
+      user: { id: launch.userId, firstName: launch.firstName || 'Orca user' },
+    });
+  } catch (error) {
+    res.status(401).json({ ok: false, error: cleanError(error) });
+  }
+});
+
+function sendWalletConfig(res) {
   res.setHeader('Cache-Control', 'no-store');
   res.json({
     ok: true,
@@ -214,7 +240,16 @@ app.get('/api/miniapp/config', requireMiniAppSession, (req, res) => {
     rpcUrl: RPC_URL,
     explorerUrl: EXPLORER_TX_BASE_URL.replace(/tx\/?$/, ''),
     miniAppUrl: MINI_APP_URL,
+    browserWalletUrl: `${APP_ORIGIN}/wallet.html`,
   });
+}
+
+app.get('/api/miniapp/config', requireMiniAppSession, (_, res) => {
+  sendWalletConfig(res);
+});
+
+app.get('/api/wallet/config', requireMiniAppSession, (_, res) => {
+  sendWalletConfig(res);
 });
 
 app.get('/api/wallet', requireMiniAppSession, (req, res) => {
@@ -297,6 +332,7 @@ app.get('/api/config', (_, res) => {
     explorerTxBaseUrl: EXPLORER_TX_BASE_URL,
     miniAppReady: Boolean(REOWN_PROJECT_ID && MINI_APP_URL),
     miniAppUrl: MINI_APP_URL,
+    browserWalletUrl: `${APP_ORIGIN}/wallet.html`,
   });
 });
 
@@ -366,7 +402,7 @@ async function startTelegramBot() {
   bot.command('new', async (ctx) => {
     await resetSession(ctx);
     if (!getWalletBinding(getTelegramUserId(ctx))) {
-      await ctx.reply('Connect and verify your X Layer wallet first, then send a rule like: Buy $10 of OKB if it drops below 45.', getWalletLinkKeyboard());
+      await ctx.reply('Connect and verify your X Layer wallet first, then send a rule like: Buy $10 of OKB if it drops below 45.', await getWalletLinkKeyboard(ctx));
       return;
     }
 
@@ -423,7 +459,8 @@ async function startTelegramBot() {
       return;
     }
 
-    await ctx.reply(renderWalletMessage(ctx), getWalletLinkKeyboard());
+    const launch = await createWalletLaunch(ctx);
+    await ctx.reply(renderWalletMessage(ctx, launch.browserLaunch), launch.keyboard);
   });
 
   bot.command('positions', async (ctx) => {
@@ -457,7 +494,7 @@ async function startTelegramBot() {
 
     if (session.step === 'awaiting_wallet_link') {
       if (!binding) {
-        await ctx.reply('Connect and verify your X Layer wallet first, then send any message here to continue.', getWalletLinkKeyboard());
+        await ctx.reply('Connect and verify your X Layer wallet first, then send any message here to continue.', await getWalletLinkKeyboard(ctx));
         return;
       }
 
@@ -492,7 +529,7 @@ async function startTelegramBot() {
       await persistStore();
 
       if (session.step === 'awaiting_wallet_link') {
-        await ctx.reply('Connect and verify your X Layer wallet before you confirm this rule.', getWalletLinkKeyboard());
+        await ctx.reply('Connect and verify your X Layer wallet before you confirm this rule.', await getWalletLinkKeyboard(ctx));
       } else {
         await sendDraftPreview(ctx, session.draft);
       }
@@ -515,7 +552,7 @@ async function startTelegramBot() {
       session.draft = draft;
       session.updatedAt = nowIso();
       await persistStore();
-      await ctx.reply('Connect and verify your X Layer wallet before you confirm this rule.', getWalletLinkKeyboard());
+      await ctx.reply('Connect and verify your X Layer wallet before you confirm this rule.', await getWalletLinkKeyboard(ctx));
       return;
     }
 
@@ -575,7 +612,7 @@ async function startTelegramBot() {
       session.step = 'awaiting_wallet_link';
       await persistStore();
       await ctx.answerCbQuery('Wallet link required');
-      await ctx.reply('Connect and verify your current X Layer wallet before confirming this rule.', getWalletLinkKeyboard());
+      await ctx.reply('Connect and verify your current X Layer wallet before confirming this rule.', await getWalletLinkKeyboard(ctx));
       return;
     }
 
@@ -1234,12 +1271,12 @@ function safeEqualHex(left, right) {
   }
 }
 
-function createWebSession(telegramUser) {
+function createWebSession(telegramUser, chatId = telegramUser.id) {
   const token = randomBytes(32).toString('base64url');
   const now = Date.now();
   const record = {
     userId: String(telegramUser.id),
-    chatId: String(telegramUser.id),
+    chatId: String(chatId || telegramUser.id),
     csrfToken: randomBytes(24).toString('base64url'),
     createdAt: nowIso(),
     expiresAt: new Date(now + WEB_SESSION_TTL_SECONDS * 1000).toISOString(),
@@ -1250,11 +1287,12 @@ function createWebSession(telegramUser) {
 
 function requireMiniAppSession(req, res, next) {
   cleanupExpiredWalletState();
-  const token = parseCookies(req.headers.cookie || '').orca_mini_session;
+  const cookies = parseCookies(req.headers.cookie || '');
+  const token = cookies[MINI_APP_SESSION_COOKIE] || cookies[BROWSER_SESSION_COOKIE];
   const session = token ? store.webSessions[hashOpaqueToken(token)] : null;
 
   if (!session || Date.parse(session.expiresAt) <= Date.now()) {
-    res.status(401).json({ ok: false, error: 'Your wallet session expired. Reopen Orca from Telegram.' });
+    res.status(401).json({ ok: false, error: 'Your wallet session expired. Open Orca from Telegram or use a fresh browser link code.' });
     return;
   }
 
@@ -1330,6 +1368,62 @@ function buildWalletLinkMessage(nonce) {
     '',
     'This signature verifies wallet ownership. It does not approve a transfer or give Orca access to your funds.',
   ].join('\n');
+}
+
+function buildBrowserWalletUrl(code) {
+  const url = new URL('/wallet.html', APP_ORIGIN);
+  if (code) {
+    url.searchParams.set('code', code);
+  }
+  return url.toString();
+}
+
+function createBrowserLaunchCode(telegramUser, chatId) {
+  cleanupExpiredWalletState();
+  const code = randomBytes(18).toString('base64url');
+  const record = {
+    userId: String(telegramUser.id),
+    chatId: String(chatId || telegramUser.id),
+    firstName: telegramUser.first_name || 'Orca user',
+    createdAt: nowIso(),
+    expiresAt: new Date(Date.now() + WALLET_NONCE_TTL_SECONDS * 1000).toISOString(),
+  };
+  store.browserLaunchCodes[hashOpaqueToken(code)] = record;
+  return { code, url: buildBrowserWalletUrl(code), expiresAt: record.expiresAt };
+}
+
+function verifyBrowserLaunchCode(code) {
+  cleanupExpiredWalletState();
+  const key = hashOpaqueToken(String(code || ''));
+  const launch = store.browserLaunchCodes[key];
+
+  if (!launch || Date.parse(launch.expiresAt) <= Date.now()) {
+    delete store.browserLaunchCodes[key];
+    throw new Error('This browser link code expired. Open /wallet in Telegram and generate a new one.');
+  }
+
+  delete store.browserLaunchCodes[key];
+  return launch;
+}
+
+async function createWalletLaunch(ctx) {
+  const launch = createBrowserLaunchCode({
+    id: getTelegramUserId(ctx),
+    first_name: ctx.from?.first_name || 'Orca user',
+  }, getChatId(ctx));
+  const buttons = [];
+
+  if (MINI_APP_URL.startsWith('https://')) {
+    buttons.push(Markup.button.webApp('Open in Telegram', MINI_APP_URL));
+  }
+
+  buttons.push(Markup.button.url('Open in browser', launch.url));
+  await persistStore();
+
+  return {
+    browserLaunch: launch,
+    keyboard: buttons.length ? Markup.inlineKeyboard([buttons]) : undefined,
+  };
 }
 
 function verifyWalletLink({ userId, chatId, nonceId, address, signature }) {
@@ -1439,6 +1533,12 @@ function cleanupExpiredWalletState() {
       delete store.walletLinkNonces[key];
     }
   }
+
+  for (const [key, launch] of Object.entries(store.browserLaunchCodes || {})) {
+    if (Date.parse(launch.expiresAt) <= now) {
+      delete store.browserLaunchCodes[key];
+    }
+  }
 }
 
 async function loadStore() {
@@ -1468,13 +1568,14 @@ async function persistStore() {
 
 function defaultStore() {
   return {
-    version: 2,
+    version: 3,
     sessions: {},
     intents: [],
     priceHistory: [],
     walletBindings: {},
     webSessions: {},
     walletLinkNonces: {},
+    browserLaunchCodes: {},
   };
 }
 
@@ -1489,6 +1590,7 @@ function normalizeStore(raw) {
   base.walletBindings = normalizeWalletBindings(raw.walletBindings);
   base.webSessions = normalizeExpiringRecords(raw.webSessions);
   base.walletLinkNonces = normalizeExpiringRecords(raw.walletLinkNonces);
+  base.browserLaunchCodes = normalizeBrowserLaunchCodes(raw.browserLaunchCodes);
   base.intents = Array.isArray(raw.intents) ? raw.intents.map(normalizeIntent).filter(Boolean) : [];
   base.priceHistory = Array.isArray(raw.priceHistory)
     ? raw.priceHistory.map(normalizePricePoint).filter(Boolean)
@@ -1547,6 +1649,26 @@ function normalizeExpiringRecords(rawRecords) {
       records[key] = record;
     }
     return records;
+  }, {});
+}
+
+function normalizeBrowserLaunchCodes(rawCodes) {
+  if (!rawCodes || typeof rawCodes !== 'object') {
+    return {};
+  }
+
+  const now = Date.now();
+  return Object.entries(rawCodes).reduce((codes, [key, record]) => {
+    if (record && Number.isFinite(Date.parse(record.expiresAt)) && Date.parse(record.expiresAt) > now && record.userId) {
+      codes[key] = {
+        userId: String(record.userId),
+        chatId: String(record.chatId || record.userId),
+        firstName: record.firstName || 'Orca user',
+        createdAt: record.createdAt || nowIso(),
+        expiresAt: record.expiresAt,
+      };
+    }
+    return codes;
   }, {});
 }
 
@@ -2106,7 +2228,7 @@ function formatIntentStatus(intent) {
 function renderStartMessage() {
   return [
     'Welcome to Orca.',
-    'First use /wallet to connect and verify your X Layer testnet wallet, then tap a strategy or send a sentence like “Buy $10 of OKB if it drops below 45.”',
+    'First use /wallet to connect and verify your X Layer testnet wallet, then tap a strategy or send a sentence like “Buy $10 of OKB if it drops below 45.” Desktop and mobile browsers can use the browser code from /wallet too.',
     'Orca uses your verified wallet as the recipient. It never asks for your private key.',
     '',
     'Commands: /wallet /buy /sell /takeprofit /stoploss /dca /new /edit /list /status /positions /risk /price /chart /cancel /help',
@@ -2116,23 +2238,33 @@ function renderStartMessage() {
 function renderHelpMessage() {
   return [
     'Orca turns plain English into a live X Layer testnet intent.',
-    'Start with /wallet: connect an EVM wallet, switch to X Layer testnet (1952), and sign once to verify ownership.',
+    'Start with /wallet: connect an EVM wallet, switch to X Layer testnet (1952), and sign once to verify ownership. If Telegram opens a browser link instead, paste the one-time code into a wallet browser on desktop or mobile.',
     'Examples: Buy $10 of OKB if it drops below 45. Sell $10 of OKB if it rises above 110. DCA $10 every day.',
     'Orca uses the verified linked wallet as your receiving address. It never receives your private key and the signature does not approve spending from your wallet.',
     'Use /buy, /sell, /takeprofit, /stoploss, or /dca to load a template. Use /price or /chart for the live OKB card, /wallet to manage your link, /list to see every stored rule, /status to see the latest live one, and /positions or /risk to inspect the testnet state.',
   ].join('\n');
 }
 
-function renderWalletMessage(ctx) {
+function renderWalletMessage(ctx, browserLaunch) {
   const binding = getWalletBinding(getTelegramUserId(ctx));
+  const browserLines = browserLaunch
+    ? [
+        '',
+        `Browser code: ${browserLaunch.code}`,
+        'Use the browser button on desktop, or paste the code into a wallet app browser on mobile.',
+      ]
+    : [];
 
   if (!binding) {
     return [
       'No wallet is linked yet.',
       `Connect an EVM wallet, switch to X Layer testnet (chain ${CHAIN_ID}), and sign the one-time ownership message.`,
       'Your private key never leaves your wallet. The signature does not approve a transfer.',
-      MINI_APP_URL.startsWith('https://') ? 'Tap Connect wallet below.' : 'Wallet Mini App needs a public HTTPS URL before it can open inside Telegram.',
-    ].join('\n');
+      ...browserLines,
+      MINI_APP_URL.startsWith('https://')
+        ? 'Use the buttons below to open Telegram or a browser wallet.'
+        : 'Wallet Mini App needs a public HTTPS URL before it can open inside Telegram.',
+    ].filter(Boolean).join('\n');
   }
 
   return [
@@ -2140,19 +2272,15 @@ function renderWalletMessage(ctx) {
     `Linked wallet: ${binding.address}`,
     `Network: X Layer testnet (${binding.chainId})`,
     `Verified: ${formatUtc(binding.verifiedAt)}`,
+    ...browserLines,
     '',
     'New intents will use this verified address as the recipient for sponsored testnet transfers.',
   ].join('\n');
 }
 
-function getWalletLinkKeyboard() {
-  if (!MINI_APP_URL.startsWith('https://')) {
-    return undefined;
-  }
-
-  return Markup.inlineKeyboard([
-    [Markup.button.webApp('Connect wallet', MINI_APP_URL)],
-  ]);
+async function getWalletLinkKeyboard(ctx) {
+  const launch = await createWalletLaunch(ctx);
+  return launch.keyboard;
 }
 
 function applyWalletBindingToDraft(draft, binding) {
@@ -2422,7 +2550,7 @@ async function startTemplateFlow(ctx, strategyKey) {
   await persistStore();
 
   if (!binding) {
-    await ctx.reply(renderStrategyTemplate(strategyKey, draft), getWalletLinkKeyboard());
+    await ctx.reply(renderStrategyTemplate(strategyKey, draft), await getWalletLinkKeyboard(ctx));
     return;
   }
 

@@ -17,8 +17,31 @@
 
       <section class="wallet-card">
         <p class="eyebrow">Verified wallet</p>
-        <h1>Connect once.<br />Use your wallet everywhere.</h1>
-        <p class="lede" data-wallet-copy>Checking your secure Telegram session…</p>
+        <h1>Connect once.<br />Use your wallet anywhere.</h1>
+        <p class="lede" data-wallet-copy>Checking your secure session…</p>
+
+        <div class="browser-access" data-browser-access hidden>
+          <form class="browser-form" data-browser-form>
+            <label for="browser-code">Browser access code</label>
+            <div class="browser-row">
+              <input
+                id="browser-code"
+                data-browser-code
+                type="text"
+                placeholder="Paste the code from Telegram"
+                autocomplete="one-time-code"
+                inputmode="text"
+                spellcheck="false"
+              />
+              <button class="button button-secondary browser-submit" type="submit" data-browser-submit>
+                Open browser session
+              </button>
+            </div>
+          </form>
+          <p class="browser-hint" data-browser-hint>
+            Open /wallet in Telegram to get a one-time browser code.
+          </p>
+        </div>
 
         <div class="wallet-state" data-wallet-state>
           <span class="state-dot"></span>
@@ -41,6 +64,7 @@
         <h2>What connection means</h2>
         <ul>
           <li>Your verified address becomes Orca’s testnet transfer recipient.</li>
+          <li>Desktop browsers and mobile wallet browsers can use the same one-time code.</li>
           <li>Orca still uses its own funded testnet execution wallet.</li>
           <li>You can disconnect at any time; live intents tied to this wallet are paused.</li>
         </ul>

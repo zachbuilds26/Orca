@@ -15,7 +15,12 @@ body {
   font-family: 'Space Grotesk', system-ui, sans-serif;
 }
 
-button { font: inherit; cursor: pointer; }
+button,
+input {
+  font: inherit;
+}
+
+button { cursor: pointer; }
 
 .wallet-app {
   width: min(100%, 620px);
@@ -61,6 +66,75 @@ h1 { margin: 10px 0 14px; font-size: clamp(2.1rem, 10vw, 3.7rem); line-height: 0
 
 .lede { margin: 0; color: #a8b8ca; line-height: 1.55; }
 
+.browser-access {
+  margin-top: 18px;
+  padding: 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(104, 219, 255, 0.14);
+  background: rgba(8, 18, 28, 0.82);
+}
+
+.browser-form {
+  display: grid;
+  gap: 10px;
+}
+
+.browser-form label {
+  color: #68dbff;
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.browser-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.browser-row .browser-code,
+.browser-row .browser-submit {
+  min-height: 52px;
+}
+
+.browser-code {
+  width: 100%;
+  padding: 0 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(137, 167, 202, 0.22);
+  background: rgba(10, 21, 34, 0.92);
+  color: #edf6ff;
+  outline: none;
+}
+
+.browser-code::placeholder { color: #7f92a8; }
+
+.browser-code:focus {
+  border-color: rgba(104, 219, 255, 0.72);
+  box-shadow: 0 0 0 3px rgba(104, 219, 255, 0.12);
+}
+
+.browser-submit {
+  width: auto;
+  min-width: 180px;
+  border: 0;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #68dbff, #91f1b2);
+  color: #07131b;
+  font-weight: 700;
+}
+
+.browser-submit:disabled { cursor: wait; opacity: 0.58; }
+
+.browser-hint {
+  margin: 10px 0 0;
+  color: #8fa2b8;
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
 .wallet-state { display: flex; align-items: center; gap: 9px; margin: 22px 0 12px; color: #cdd9e6; font-size: 0.92rem; }
 
 .state-dot { width: 9px; height: 9px; border-radius: 50%; background: #d7b76e; box-shadow: 0 0 0 4px rgba(215, 183, 110, 0.14); }
@@ -82,5 +156,16 @@ h1 { margin: 10px 0 14px; font-size: clamp(2.1rem, 10vw, 3.7rem); line-height: 0
 .info-card { padding: 22px 24px; }
 h2 { margin: 0 0 12px; font-size: 1.25rem; letter-spacing: -0.05em; }
 ul { display: grid; gap: 10px; margin: 0; padding-left: 19px; color: #a8b8ca; font-size: 0.9rem; line-height: 1.45; }
+
+@media (max-width: 560px) {
+  .wallet-card,
+  .info-card { border-radius: 20px; }
+
+  .wallet-card { padding: 22px; }
+
+  .browser-row { grid-template-columns: 1fr; }
+
+  .browser-submit { width: 100%; min-width: 0; }
+}
 
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; } }
