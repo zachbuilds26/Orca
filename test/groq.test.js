@@ -9,31 +9,31 @@ import {
   parseClassificationResponse,
 } from '../src/groq.js';
 
-test('fallback classifier recognizes info and draft messages', () => {
+test('fallback classifier recognizes commands and draft messages', () => {
   assert.deepEqual(classifyFallbackMessage('what can you do?'), {
-    action: 'info',
-    infoKey: 'help',
+    action: 'command',
+    command: 'help',
   });
 
   assert.deepEqual(classifyFallbackMessage('Buy $10 of OKB if it drops below 45'), {
     action: 'draft',
-    strategy: null,
-    normalizedCommand: 'Buy $10 of OKB if it drops below 45',
   });
 
   assert.equal(classifyFallbackMessage('my seed phrase is secret'), null);
 });
 
 test('classification parsing accepts allowed payloads and rejects extras', () => {
-  assert.deepEqual(parseClassificationResponse('{"action":"info","infoKey":"price"}'), {
-    action: 'info',
-    infoKey: 'price',
+  assert.deepEqual(parseClassificationResponse('{"action":"command","command":"price"}'), {
+    action: 'command',
+    command: 'price',
   });
 
-  assert.deepEqual(parseClassificationResponse('{"action":"draft","strategy":"buy","normalizedCommand":"buy $10 of OKB below 45"}'), {
+  assert.deepEqual(parseClassificationResponse('{"action":"draft"}'), {
     action: 'draft',
-    strategy: 'buy',
-    normalizedCommand: 'buy $10 of OKB below 45',
+  });
+
+  assert.deepEqual(parseClassificationResponse('{"action":"chat"}'), {
+    action: 'chat',
   });
 
   assert.throws(() => parseClassificationResponse('{"action":"chat","reason":"hello"}'), GroqValidationError);
@@ -53,7 +53,7 @@ test('groq client uses the provided fetch implementation', async () => {
       return {
         ok: true,
         json: async () => ({
-          choices: [{ message: { content: '{"action":"info","infoKey":"help"}' } }],
+          choices: [{ message: { content: '{"action":"command","command":"help"}' } }],
         }),
       };
     },
@@ -62,8 +62,8 @@ test('groq client uses the provided fetch implementation', async () => {
   const result = await client.classifyMessage('help');
 
   assert.deepEqual(result, {
-    action: 'info',
-    infoKey: 'help',
+    action: 'command',
+    command: 'help',
   });
   assert.equal(requests.length, 1);
   assert.equal(requests[0].url, 'https://api.groq.com/openai/v1/chat/completions');

@@ -44,11 +44,22 @@ const TELEGRAM_INIT_DATA_MAX_AGE_SECONDS = Number(process.env.TELEGRAM_INIT_DATA
 const WEB_SESSION_TTL_SECONDS = Number(process.env.ORCA_WEB_SESSION_TTL_SECONDS || 1800);
 const WALLET_NONCE_TTL_SECONDS = Number(process.env.ORCA_WALLET_NONCE_TTL_SECONDS || 300);
 const MAX_OPEN_INTENTS_PER_USER = Number(process.env.MAX_OPEN_INTENTS_PER_USER || 3);
+const ORCA_MIN_AMOUNT_USD = normalizePositiveNumber(process.env.ORCA_MIN_AMOUNT_USD, 1);
+const ORCA_MAX_AMOUNT_USD = normalizePositiveNumber(process.env.ORCA_MAX_AMOUNT_USD, 25);
+const ORCA_MIN_TRIGGER_PRICE = normalizePositiveNumber(process.env.ORCA_MIN_TRIGGER_PRICE, 0.01);
+const ORCA_MAX_TRIGGER_PRICE = normalizePositiveNumber(process.env.ORCA_MAX_TRIGGER_PRICE, 100000);
+const ORCA_MIN_DCA_INTERVAL_MS = normalizePositiveInteger(process.env.ORCA_MIN_DCA_INTERVAL_MS, 60 * 60 * 1000);
+const ORCA_MAX_DCA_INTERVAL_MS = normalizePositiveInteger(process.env.ORCA_MAX_DCA_INTERVAL_MS, 30 * 24 * 60 * 60 * 1000);
+const ORCA_MAX_DCA_RUNS = normalizePositiveInteger(process.env.ORCA_MAX_DCA_RUNS, 365);
+const ORCA_MIN_EXPIRY_MS = normalizePositiveInteger(process.env.ORCA_MIN_EXPIRY_MS, 15 * 60 * 1000);
+const ORCA_MAX_EXPIRY_MS = normalizePositiveInteger(process.env.ORCA_MAX_EXPIRY_MS, 30 * 24 * 60 * 60 * 1000);
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 const GROQ_MODEL = process.env.GROQ_MODEL || '';
 const GROQ_TIMEOUT_MS = normalizePositiveInteger(process.env.GROQ_TIMEOUT_MS, 4500);
 const GROQ_MAX_INPUT_CHARS = normalizePositiveInteger(process.env.GROQ_MAX_INPUT_CHARS, 1200);
 const GROQ_REQUESTS_PER_MINUTE = normalizePositiveInteger(process.env.GROQ_REQUESTS_PER_MINUTE, 30);
+const GROQ_REQUESTS_PER_USER_PER_MINUTE = normalizePositiveInteger(process.env.GROQ_REQUESTS_PER_USER_PER_MINUTE, 10);
+const ORCA_EXECUTION_STALE_TIMEOUT_MS = normalizePositiveInteger(process.env.ORCA_EXECUTION_STALE_TIMEOUT_MS, 5 * 60 * 1000);
 const groqClient = createGroqClient({
   apiKey: GROQ_API_KEY,
   model: GROQ_MODEL || undefined,
@@ -56,6 +67,7 @@ const groqClient = createGroqClient({
   maxInputChars: GROQ_MAX_INPUT_CHARS,
 });
 const groqRequestWindow = { startedAt: 0, count: 0 };
+const groqRequestBuckets = new Map();
 const MINI_APP_SESSION_COOKIE = 'orca_mini_session';
 const BROWSER_SESSION_COOKIE = 'orca_browser_session';
 const IS_PRODUCTION = APP_ORIGIN.startsWith('https://');
@@ -78,6 +90,7 @@ const TELEGRAM_COMMANDS = [
   { command: 'cancel', description: 'Cancel the active intent' },
   { command: 'help', description: 'Show how Orca works' },
 ];
+const TELEGRAM_COMMAND_NAMES = new Set(TELEGRAM_COMMANDS.map(({ command }) => command));
 const TELEGRAM_QUICK_KEYBOARD = Markup.keyboard([
   ['/buy', '/sell', '/takeprofit'],
   ['/stoploss', '/dca', '/new'],
@@ -477,13 +490,7 @@ async function startTelegramBot() {
   });
 
   bot.command('wallet', async (ctx) => {
-    if (!isPrivateChat(ctx)) {
-      await ctx.reply('For wallet safety, open Orca in a private chat and use /wallet there.');
-      return;
-    }
-
-    const launch = await createWalletLaunch(ctx);
-    await ctx.reply(renderWalletMessage(ctx, launch.browserLaunch), launch.keyboard);
+    await startWalletFlow(ctx);
   });
 
   bot.command('positions', async (ctx) => {
@@ -495,7 +502,7 @@ async function startTelegramBot() {
   });
 
   bot.command('cancel', async (ctx) => {
-    await cancelLatestIntent(ctx);
+    await respondToCancel(ctx, await cancelLatestIntent(getChatId(ctx)));
   });
 
   bot.on('text', async (ctx) => {
@@ -509,6 +516,10 @@ async function startTelegramBot() {
     const text = ctx.message.text.trim();
 
     if (text.startsWith('/')) {
+      const slashCommand = getTelegramCommandName(text);
+      if (slashCommand && !TELEGRAM_COMMAND_NAMES.has(slashCommand)) {
+        await ctx.reply(renderHelpMessage());
+      }
       return;
     }
 
@@ -535,9 +546,10 @@ async function startTelegramBot() {
     }
 
     if (session.step === 'awaiting_trigger') {
-      const triggerPrice = extractTriggerPrice(text);
-      if (!triggerPrice) {
-        await ctx.reply('Send just the trigger price, like 45.');
+      const triggerDirection = session.draft?.triggerDirection || (session.draft?.side === 'sell' ? 'above' : 'below');
+      const triggerPrice = parseTriggerPriceInput(text, triggerDirection);
+      if (!Number.isFinite(triggerPrice) || triggerPrice <= 0) {
+        await ctx.reply(triggerDirection === 'above' ? 'Send a price above the current target, like 110.' : 'Send just the trigger price, like 45.');
         return;
       }
 
@@ -584,8 +596,7 @@ async function startTelegramBot() {
   });
 
   bot.action('orca_cancel', async (ctx) => {
-    await cancelLatestIntent(ctx);
-    await ctx.answerCbQuery('Canceled');
+    await respondToCancel(ctx, await cancelLatestIntent(getChatId(ctx)));
   });
 
   bot.action('orca_confirm', async (ctx) => {
@@ -1501,7 +1512,7 @@ function serializeWalletBinding(binding) {
 
 function pauseIntentsForWalletBinding(binding, reason) {
   for (const intent of store.intents) {
-    if ((intent.status === 'active' || intent.status === 'executing') && intent.walletBindingId === binding.bindingId) {
+    if (isLiveIntentStatus(intent.status) && intent.walletBindingId === binding.bindingId) {
       intent.status = 'wallet_unlinked';
       intent.lastError = reason;
       intent.updatedAt = nowIso();
@@ -1567,7 +1578,7 @@ async function persistStore() {
 
 function defaultStore() {
   return {
-    version: 3,
+    version: 4,
     sessions: {},
     intents: [],
     priceHistory: [],
@@ -1586,6 +1597,15 @@ function normalizeStore(raw) {
   }
 
   base.sessions = raw.sessions && typeof raw.sessions === 'object' ? raw.sessions : {};
+  for (const [chatId, session] of Object.entries(base.sessions)) {
+    if (!session || typeof session !== 'object' || !['idle', 'awaiting_wallet_link', 'awaiting_trigger', 'awaiting_confirm'].includes(session.step)) {
+      base.sessions[chatId] = {
+        step: 'idle',
+        draft: null,
+        updatedAt: nowIso(),
+      };
+    }
+  }
   base.walletBindings = normalizeWalletBindings(raw.walletBindings);
   base.webSessions = normalizeExpiringRecords(raw.webSessions);
   base.walletLinkNonces = normalizeExpiringRecords(raw.walletLinkNonces);
@@ -1596,9 +1616,15 @@ function normalizeStore(raw) {
     : [];
 
   for (const intent of base.intents) {
-    if ((intent.status === 'active' || intent.status === 'executing') && !intent.walletBindingId) {
+    if (isLiveIntentStatus(intent.status) && !intent.walletBindingId) {
       intent.status = 'wallet_link_required';
       intent.lastError = 'This legacy intent used an unverified address. Link a wallet and create a new intent.';
+      intent.updatedAt = nowIso();
+    }
+
+    if (intent.status === 'executing' && !intent.txHash && intent.executingAt && Date.now() - Date.parse(intent.executingAt) > ORCA_EXECUTION_STALE_TIMEOUT_MS) {
+      intent.status = 'execution_unknown';
+      intent.lastError = 'The previous execution attempt was interrupted before its outcome was known.';
       intent.updatedAt = nowIso();
     }
   }
@@ -1701,6 +1727,9 @@ function normalizeIntent(intent) {
   const runsTarget = recurring ? (intent.runsTarget == null ? null : Number(intent.runsTarget)) : 1;
   const runsCompleted = Number(intent.runsCompleted || 0);
   const triggerPrice = intent.triggerPrice == null ? null : Number(intent.triggerPrice);
+  const amountUsd = Number(intent.amountUsd || 10);
+  const expiryAt = intent.expiryAt || null;
+  const nextRunAt = intent.nextRunAt || null;
 
   return {
     id: intent.id || randomUUID(),
@@ -1711,16 +1740,16 @@ function normalizeIntent(intent) {
     side: intent.side || strategy.side,
     triggerDirection: intent.triggerDirection || strategy.triggerDirection || null,
     recurring,
-    amountUsd: Number(intent.amountUsd || 10),
+    amountUsd: Number.isFinite(amountUsd) ? amountUsd : 10,
     triggerPrice: Number.isFinite(triggerPrice) ? triggerPrice : null,
     recipientAddress: intent.recipientAddress || '',
     ownerTelegramUserId: String(intent.ownerTelegramUserId || ''),
     walletBindingId: intent.walletBindingId || null,
     walletBindingVersion: Number(intent.walletBindingVersion || 0) || null,
     recipientSource: intent.recipientSource || 'legacy_manual_unverified',
-    settlementType: intent.settlementType || 'legacy_manual_transfer',
-    expiryAt: intent.expiryAt || null,
-    expiryLabel: intent.expiryLabel || '24 hours',
+    settlementType: intent.settlementType || 'sponsored_native_okb_transfer',
+    expiryAt: recurring ? expiryAt : expiryAt || new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    expiryLabel: intent.expiryLabel || (recurring ? 'until canceled' : '24 hours'),
     originalText: intent.originalText || '',
     status: intent.status || 'active',
     createdAt: intent.createdAt || nowIso(),
@@ -1742,9 +1771,9 @@ function normalizeIntent(intent) {
     lastError: intent.lastError || null,
     intervalMs,
     intervalLabel: intent.intervalLabel || (intervalMs ? formatIntervalLabel(intervalMs) : null),
-    nextRunAt: intent.nextRunAt || null,
+    nextRunAt: recurring ? nextRunAt : null,
     runsTarget,
-    runsCompleted,
+    runsCompleted: Number.isFinite(runsCompleted) ? runsCompleted : 0,
     completedAt: intent.completedAt || null,
     lastRunAt: intent.lastRunAt || null,
   };
@@ -1770,6 +1799,10 @@ async function resetSession(ctx) {
   await persistStore();
 }
 
+function isLiveIntentStatus(status) {
+  return status === 'active' || status === 'executing' || status === 'broadcast' || status === 'cancel_requested';
+}
+
 function cancelLiveIntentForChat(chatId) {
   const key = String(chatId);
 
@@ -1778,27 +1811,63 @@ function cancelLiveIntentForChat(chatId) {
       continue;
     }
 
-    if (intent.status === 'active' || intent.status === 'executing') {
+    if (intent.status === 'active') {
       intent.status = 'canceled';
       intent.canceledAt = nowIso();
+      intent.updatedAt = nowIso();
+      continue;
+    }
+
+    if (intent.status === 'executing' && !intent.txHash) {
+      intent.status = 'cancel_requested';
+      intent.cancelRequestedAt = nowIso();
+      intent.updatedAt = nowIso();
+      continue;
+    }
+
+    if (intent.status === 'broadcast' || intent.txHash) {
+      intent.status = 'cancel_requested';
+      intent.cancelRequestedAt = nowIso();
+      intent.lastError = 'Cancellation requested after broadcast; Orca will keep reconciling the transaction.';
       intent.updatedAt = nowIso();
     }
   }
 }
 
-async function cancelLatestIntent(ctx) {
-  const chatId = getChatId(ctx);
-  const session = getSession(chatId);
+async function cancelLatestIntent(chatId) {
   const key = String(chatId);
+  const session = getSession(key);
   let canceled = false;
+  let cancelRequested = false;
 
   for (let i = store.intents.length - 1; i >= 0; i -= 1) {
     const intent = store.intents[i];
-    if (intent.chatId === key && (intent.status === 'active' || intent.status === 'executing')) {
+    if (intent.chatId !== key || !isLiveIntentStatus(intent.status)) {
+      continue;
+    }
+
+    if (intent.status === 'active') {
       intent.status = 'canceled';
       intent.canceledAt = nowIso();
       intent.updatedAt = nowIso();
       canceled = true;
+      break;
+    }
+
+    if (intent.status === 'executing' && !intent.txHash) {
+      intent.status = 'cancel_requested';
+      intent.cancelRequestedAt = nowIso();
+      intent.updatedAt = nowIso();
+      cancelRequested = true;
+      break;
+    }
+
+    if (intent.status === 'broadcast' || intent.txHash) {
+      intent.status = 'cancel_requested';
+      intent.cancelRequestedAt = nowIso();
+      intent.lastError = 'Cancellation requested after broadcast; Orca will keep reconciling the transaction.';
+      intent.updatedAt = nowIso();
+      cancelRequested = true;
       break;
     }
   }
@@ -1809,11 +1878,11 @@ async function cancelLatestIntent(ctx) {
   delete store.sessions[key];
   await persistStore();
 
-  if (ctx.answerCbQuery) {
-    await ctx.answerCbQuery(canceled ? 'Canceled' : 'Cleared');
-  }
-
-  await ctx.reply(canceled ? 'Orca canceled the active intent.' : 'Orca cleared the draft.');
+  return {
+    canceled,
+    cancelRequested,
+    clearedDraft: !canceled && !cancelRequested,
+  };
 }
 
 function getLatestIntent(chatId) {
@@ -1829,7 +1898,7 @@ function getLatestIntent(chatId) {
 }
 
 function getLiveIntents() {
-  return store.intents.filter((intent) => intent.status === 'active' || intent.status === 'executing');
+  return store.intents.filter((intent) => isLiveIntentStatus(intent.status));
 }
 
 function getDefaultTriggerPrice(strategyKey) {
@@ -1849,10 +1918,16 @@ function getDefaultTriggerPrice(strategyKey) {
 function createDraftFromText(text, binding = null, forcedStrategyKey = null) {
   const normalized = text.trim().replace(/\s+/g, ' ');
   const strategy = resolveStrategy(normalized, forcedStrategyKey);
+  const recurring = Boolean(strategy.recurring);
+  const amountUsd = extractAmountUsd(normalized) ?? 10;
+  const triggerPrice = recurring ? null : extractTriggerPrice(normalized, strategy.triggerDirection || 'below');
+  const explicitRunsTarget = recurring ? extractRunsTarget(normalized) : 1;
+  const interval = recurring ? (extractIntervalMs(normalized) || { ms: 24 * 60 * 60 * 1000, label: 'daily' }) : null;
   const expiry = resolveExpiry(normalized);
-  const interval = strategy.recurring ? extractIntervalMs(normalized) : null;
-  const triggerPrice = strategy.recurring ? null : extractTriggerPrice(normalized, strategy.triggerDirection || 'below');
-  const runsTarget = strategy.recurring ? extractRunsTarget(normalized) : 1;
+  const explicitUntilCanceled = recurring && explicitRunsTarget === null;
+  const nextRunAt = recurring && interval?.ms ? new Date(Date.now() + interval.ms).toISOString() : null;
+  const expiryAt = recurring ? (explicitUntilCanceled ? null : (expiry.explicit ? expiry.at : null)) : expiry.at;
+  const expiryLabel = recurring ? (explicitUntilCanceled ? 'until canceled' : (expiry.explicit ? expiry.label : 'until canceled')) : expiry.label;
 
   return {
     token: 'OKB',
@@ -1860,8 +1935,8 @@ function createDraftFromText(text, binding = null, forcedStrategyKey = null) {
     strategyLabel: strategy.label,
     side: strategy.side,
     triggerDirection: strategy.triggerDirection || null,
-    recurring: Boolean(strategy.recurring),
-    amountUsd: extractAmountUsd(normalized) ?? 10,
+    recurring,
+    amountUsd,
     triggerPrice,
     recipientAddress: binding?.address || null,
     walletBindingId: binding?.bindingId || null,
@@ -1869,20 +1944,22 @@ function createDraftFromText(text, binding = null, forcedStrategyKey = null) {
     ownerTelegramUserId: binding?.telegramUserId || null,
     intervalMs: interval?.ms || null,
     intervalLabel: interval?.label || null,
-    runsTarget: strategy.recurring ? (runsTarget ?? DEFAULT_DCA_RUNS) : 1,
+    runsTarget: recurring ? (explicitRunsTarget ?? DEFAULT_DCA_RUNS) : 1,
     runsCompleted: 0,
-    nextRunAt: strategy.recurring && interval?.ms ? new Date(Date.now() + interval.ms).toISOString() : null,
-    expiryAt: expiry.at,
-    expiryLabel: expiry.label,
+    nextRunAt,
+    expiryAt,
+    expiryLabel,
     originalText: normalized,
   };
 }
 
 function createBlankDraft(strategyKey, binding = null) {
   const strategy = resolveStrategy('', strategyKey);
-  const triggerPrice = strategy.recurring ? null : getDefaultTriggerPrice(strategyKey);
-  const interval = strategy.recurring ? extractIntervalMs(strategy.template) || { ms: 24 * 60 * 60 * 1000, label: 'daily' } : null;
-  const runsTarget = strategy.recurring ? DEFAULT_DCA_RUNS : 1;
+  const recurring = Boolean(strategy.recurring);
+  const triggerPrice = recurring ? null : getDefaultTriggerPrice(strategyKey);
+  const interval = recurring ? extractIntervalMs(strategy.template) || { ms: 24 * 60 * 60 * 1000, label: 'daily' } : null;
+  const runsTarget = recurring ? DEFAULT_DCA_RUNS : 1;
+  const nextRunAt = recurring ? new Date(Date.now() + (interval?.ms || 24 * 60 * 60 * 1000)).toISOString() : null;
 
   return {
     token: 'OKB',
@@ -1890,7 +1967,7 @@ function createBlankDraft(strategyKey, binding = null) {
     strategyLabel: strategy.label,
     side: strategy.side,
     triggerDirection: strategy.triggerDirection || null,
-    recurring: Boolean(strategy.recurring),
+    recurring,
     amountUsd: 10,
     triggerPrice,
     recipientAddress: binding?.address || null,
@@ -1901,20 +1978,29 @@ function createBlankDraft(strategyKey, binding = null) {
     intervalLabel: interval?.label || null,
     runsTarget,
     runsCompleted: 0,
-    nextRunAt: strategy.recurring ? new Date(Date.now() + (interval?.ms || 24 * 60 * 60 * 1000)).toISOString() : null,
-    expiryAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-    expiryLabel: '24 hours',
+    nextRunAt,
+    expiryAt: recurring ? null : new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    expiryLabel: recurring ? 'until canceled' : '24 hours',
     originalText: strategy.template,
   };
 }
 
 function createIntentFromDraft(chatId, draft, ownerTelegramUserId) {
+  const validationError = validateDraftForPreview(draft, { requireTrigger: true });
+  if (validationError) {
+    throw new Error(validationError);
+  }
+
   const now = nowIso();
   const key = String(chatId);
   const strategy = resolveStrategy(draft.originalText || '', draft.strategy);
   const recurring = Boolean(draft.recurring || strategy.recurring);
   const intervalMs = recurring ? (draft.intervalMs || null) : null;
   const runsTarget = recurring ? (draft.runsTarget == null ? null : Number(draft.runsTarget)) : 1;
+  const nextRunAt = recurring ? (draft.nextRunAt || (intervalMs ? new Date(Date.now() + intervalMs).toISOString() : null)) : null;
+  const expiryAt = recurring ? draft.expiryAt || null : draft.expiryAt || new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  const amountUsd = Number(draft.amountUsd);
+  const triggerPrice = draft.triggerPrice == null ? null : Number(draft.triggerPrice);
 
   return {
     id: randomUUID(),
@@ -1925,16 +2011,16 @@ function createIntentFromDraft(chatId, draft, ownerTelegramUserId) {
     side: draft.side || strategy.side,
     triggerDirection: draft.triggerDirection || strategy.triggerDirection || null,
     recurring,
-    amountUsd: Number(draft.amountUsd || 10),
-    triggerPrice: draft.triggerPrice == null ? null : Number(draft.triggerPrice),
+    amountUsd: Number.isFinite(amountUsd) ? amountUsd : 10,
+    triggerPrice: Number.isFinite(triggerPrice) ? triggerPrice : null,
     recipientAddress: draft.recipientAddress,
     ownerTelegramUserId: String(ownerTelegramUserId || draft.ownerTelegramUserId || ''),
     walletBindingId: draft.walletBindingId || null,
     walletBindingVersion: Number(draft.walletBindingVersion || 0) || null,
     recipientSource: 'verified_wallet_binding',
-    settlementType: 'sponsored_native_testnet_transfer',
-    expiryAt: draft.expiryAt,
-    expiryLabel: draft.expiryLabel || '24 hours',
+    settlementType: 'sponsored_native_okb_transfer',
+    expiryAt,
+    expiryLabel: draft.expiryLabel || (recurring ? 'until canceled' : '24 hours'),
     originalText: draft.originalText || '',
     status: 'active',
     createdAt: now,
@@ -1956,7 +2042,7 @@ function createIntentFromDraft(chatId, draft, ownerTelegramUserId) {
     lastError: null,
     intervalMs,
     intervalLabel: recurring ? (draft.intervalLabel || (intervalMs ? formatIntervalLabel(intervalMs) : null)) : null,
-    nextRunAt: recurring ? (draft.nextRunAt || (intervalMs ? new Date(Date.now() + intervalMs).toISOString() : null)) : null,
+    nextRunAt,
     runsTarget,
     runsCompleted: Number.isFinite(Number(draft.runsCompleted)) ? Number(draft.runsCompleted) : 0,
     completedAt: null,
@@ -2133,6 +2219,7 @@ function resolveExpiry(text) {
     }
 
     return {
+      explicit: true,
       label: `in ${amount} ${unit}`,
       at: new Date(Date.now() + ms).toISOString(),
     };
@@ -2140,6 +2227,7 @@ function resolveExpiry(text) {
 
   if (lower.includes('tomorrow')) {
     return {
+      explicit: true,
       label: 'tomorrow',
       at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
     };
@@ -2147,12 +2235,14 @@ function resolveExpiry(text) {
 
   if (lower.includes('today')) {
     return {
+      explicit: true,
       label: 'today',
       at: new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString(),
     };
   }
 
   return {
+    explicit: false,
     label: '24 hours',
     at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
   };
@@ -2180,7 +2270,7 @@ function formatDraftMessage(draft) {
     'Orca draft',
     `Rule: ${formatIntentRule(draft)}`,
     `Linked wallet: ${draft.recipientAddress ? shortAddress(draft.recipientAddress) : 'not connected'}`,
-    `Expiry: ${formatUtc(draft.expiryAt)} (${draft.expiryLabel})`,
+    `Expiry: ${draft.expiryAt ? `${formatUtc(draft.expiryAt)} (${draft.expiryLabel})` : draft.expiryLabel || 'until canceled'}`,
     `Estimated sponsored send: ${estimated}`,
   ];
 
@@ -2202,7 +2292,7 @@ function formatIntentStatus(intent) {
     `Rule: ${formatIntentRule(intent)}`,
     `Linked wallet: ${intent.recipientAddress ? shortAddress(intent.recipientAddress) : 'not linked'}`,
     `Settlement: sponsored native OKB testnet transfer`,
-    `Expiry: ${formatUtc(intent.expiryAt)} (${intent.expiryLabel})`,
+    `Expiry: ${intent.expiryAt ? `${formatUtc(intent.expiryAt)} (${intent.expiryLabel})` : intent.expiryLabel || 'until canceled'}`,
   ];
 
   if (intent.recurring) {
@@ -2237,11 +2327,11 @@ function renderStartMessage() {
 function renderHelpMessage() {
   return [
     'Orca turns plain English into a live X Layer testnet intent.',
-    'With Groq configured, Orca can also answer plain-language questions and draft rules from a sentence.',
+    'With Groq configured, Orca can also answer plain-language questions and route safe commands like /price, /chart, /list, /status, /positions, /risk, /cancel, and /wallet.',
     'Start with /wallet: connect an EVM wallet, switch to X Layer testnet (1952), and sign once to verify ownership. If Telegram opens a browser link instead, paste the one-time code into a wallet browser on desktop or mobile.',
     'Examples: Buy $10 of OKB if it drops below 45. Sell $10 of OKB if it rises above 110. DCA $10 every day.',
     'Orca uses the verified linked wallet as your receiving address. It never receives your private key and the signature does not approve spending from your wallet.',
-    'Use /buy, /sell, /takeprofit, /stoploss, or /dca to load a template. Use /price or /chart for the live OKB card, /wallet to manage your link, /list to see every stored rule, /status to see the latest live one, and /positions or /risk to inspect the testnet state.',
+    'Use /buy, /sell, /takeprofit, /stoploss, or /dca to load a template. Those intents place sponsored native OKB transfers on X Layer testnet, not DEX swaps. Use /price or /chart for the live OKB card, /wallet to manage your link, /list to see every stored rule, /status to see the latest live one, and /positions or /risk to inspect the testnet state.',
   ].join('\n');
 }
 
@@ -2293,16 +2383,47 @@ function applyWalletBindingToDraft(draft, binding) {
   };
 }
 
-function normalizePositiveInteger(value, fallback) {
+function normalizePositiveNumber(value, fallback) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric) || numeric <= 0) {
     return fallback;
   }
 
-  return Math.floor(numeric);
+  return numeric;
 }
 
-function allowGroqRequest() {
+function containsSensitiveContent(text) {
+  return /\b(private\s+key|seed\s+phrase|mnemonic|recovery\s+phrase|secret\s+phrase|password)\b/i.test(String(text || ''))
+    || /\b0x[a-fA-F0-9]{64}\b/.test(String(text || ''))
+    || /\b0x[a-fA-F0-9]{40}\b/.test(String(text || ''));
+}
+
+function renderSensitiveInputMessage() {
+  return 'Orca never needs a private key or seed phrase. Use /wallet to connect safely, and keep secret material out of chat.';
+}
+
+function getGroqBucket(userId) {
+  const key = String(userId || 'unknown');
+  const now = Date.now();
+  let bucket = groqRequestBuckets.get(key);
+
+  if (!bucket || now - bucket.startedAt >= 60_000) {
+    bucket = { startedAt: now, count: 0, touchedAt: now };
+  }
+
+  bucket.touchedAt = now;
+  groqRequestBuckets.set(key, bucket);
+
+  for (const [bucketKey, value] of groqRequestBuckets.entries()) {
+    if (now - value.touchedAt >= 10 * 60_000) {
+      groqRequestBuckets.delete(bucketKey);
+    }
+  }
+
+  return bucket;
+}
+
+function allowGroqRequest(userId) {
   if (!groqClient.enabled) {
     return false;
   }
@@ -2317,24 +2438,217 @@ function allowGroqRequest() {
     return false;
   }
 
+  const bucket = getGroqBucket(userId);
+  if (bucket.count >= GROQ_REQUESTS_PER_USER_PER_MINUTE) {
+    return false;
+  }
+
+  bucket.count += 1;
   groqRequestWindow.count += 1;
+  groqRequestBuckets.set(String(userId || 'unknown'), bucket);
   return true;
 }
 
+async function startWalletFlow(ctx) {
+  if (!isPrivateChat(ctx)) {
+    await ctx.reply('For wallet safety, open Orca in a private chat and use /wallet there.');
+    return false;
+  }
+
+  const launch = await createWalletLaunch(ctx);
+  await ctx.reply(renderWalletMessage(ctx, launch.browserLaunch), launch.keyboard);
+  return true;
+}
+
+async function respondToCancel(ctx, result) {
+  const message = result.canceled
+    ? 'Orca canceled the active intent.'
+    : result.cancelRequested
+      ? 'Orca marked the intent for cancellation and will keep reconciling it.'
+      : 'Orca cleared the draft.';
+
+  if (ctx.callbackQuery) {
+    await ctx.answerCbQuery(result.canceled ? 'Canceled' : result.cancelRequested ? 'Pending' : 'Cleared');
+    return;
+  }
+
+  await ctx.reply(message);
+}
+
+async function dispatchGroqAction(ctx, command) {
+  switch (command) {
+    case 'help':
+      await ctx.reply(renderHelpMessage());
+      return true;
+    case 'price':
+      await sendPriceCard(ctx, 1);
+      return true;
+    case 'chart':
+      await sendPriceCard(ctx, 7);
+      return true;
+    case 'list':
+      await ctx.reply(renderListMessage(ctx));
+      return true;
+    case 'status':
+      await ctx.reply(renderStatusMessage(ctx));
+      return true;
+    case 'positions':
+      await ctx.reply(renderPositionsMessage(ctx));
+      return true;
+    case 'risk':
+      await ctx.reply(await renderRiskMessage(ctx));
+      return true;
+    case 'cancel':
+      await respondToCancel(ctx, await cancelLatestIntent(getChatId(ctx)));
+      return true;
+    case 'wallet':
+      return startWalletFlow(ctx);
+    default:
+      await ctx.reply(renderHelpMessage());
+      return false;
+  }
+}
+
+function parseTriggerPriceInput(text, direction = 'below') {
+  const normalized = String(text || '').trim();
+  if (!normalized) {
+    return null;
+  }
+
+  if (isSimplePriceInput(normalized)) {
+    return Number(normalized.replace(/[$,]/g, ''));
+  }
+
+  return extractTriggerPrice(normalized, direction);
+}
+
+function normalizePositiveInteger(value, fallback) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return fallback;
+  }
+
+  return Math.floor(numeric);
+}
+
+function validateDraftForPreview(draft, { requireTrigger = false } = {}) {
+  const amount = Number(draft.amountUsd);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return 'Amount must be a positive number.';
+  }
+
+  if (amount < ORCA_MIN_AMOUNT_USD || amount > ORCA_MAX_AMOUNT_USD) {
+    return `Amount must be between ${usdFormatter.format(ORCA_MIN_AMOUNT_USD)} and ${usdFormatter.format(ORCA_MAX_AMOUNT_USD)}.`;
+  }
+
+  draft.amountUsd = Number(amount.toFixed(2));
+
+  if (draft.recurring) {
+    const intervalMs = Number(draft.intervalMs);
+    if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
+      return 'DCA needs a cadence like daily, weekly, or every 6 hours.';
+    }
+
+    if (intervalMs < ORCA_MIN_DCA_INTERVAL_MS || intervalMs > ORCA_MAX_DCA_INTERVAL_MS) {
+      return `DCA cadence must be between ${formatIntervalLabel(ORCA_MIN_DCA_INTERVAL_MS)} and ${formatIntervalLabel(ORCA_MAX_DCA_INTERVAL_MS)}.`;
+    }
+
+    draft.intervalMs = Math.floor(intervalMs);
+    draft.intervalLabel = formatIntervalLabel(draft.intervalMs);
+
+    if (draft.runsTarget !== null) {
+      const runsTarget = Number(draft.runsTarget);
+      if (!Number.isInteger(runsTarget) || runsTarget <= 0 || runsTarget > ORCA_MAX_DCA_RUNS) {
+        return `DCA run count must be between 1 and ${ORCA_MAX_DCA_RUNS}, or use until canceled.`;
+      }
+
+      draft.runsTarget = runsTarget;
+    }
+
+    if (draft.nextRunAt) {
+      const nextRunAt = Date.parse(draft.nextRunAt);
+      if (!Number.isFinite(nextRunAt)) {
+        return 'DCA next run time is invalid.';
+      }
+    }
+
+    if (draft.expiryAt) {
+      const expiryAt = Date.parse(draft.expiryAt);
+      if (!Number.isFinite(expiryAt)) {
+        return 'Expiry is invalid.';
+      }
+
+      const expiryDistance = expiryAt - Date.now();
+      if (expiryDistance < ORCA_MIN_EXPIRY_MS || expiryDistance > ORCA_MAX_EXPIRY_MS) {
+        return `Expiry must be between ${formatIntervalLabel(ORCA_MIN_EXPIRY_MS)} and ${formatIntervalLabel(ORCA_MAX_EXPIRY_MS)} from now.`;
+      }
+
+      if (draft.nextRunAt) {
+        const nextRunTime = Date.parse(draft.nextRunAt);
+        if (Number.isFinite(nextRunTime) && expiryAt <= nextRunTime) {
+          return 'DCA expiry must be after the next run.';
+        }
+      }
+    }
+
+    return null;
+  }
+
+  if (draft.triggerPrice == null) {
+    return requireTrigger ? 'Trigger price is missing.' : null;
+  }
+
+  const triggerPrice = Number(draft.triggerPrice);
+  if (!Number.isFinite(triggerPrice) || triggerPrice <= 0) {
+    return 'Trigger price must be a positive number.';
+  }
+
+  if (triggerPrice < ORCA_MIN_TRIGGER_PRICE || triggerPrice > ORCA_MAX_TRIGGER_PRICE) {
+    return `Trigger price must be between ${usdFormatter.format(ORCA_MIN_TRIGGER_PRICE)} and ${usdFormatter.format(ORCA_MAX_TRIGGER_PRICE)}.`;
+  }
+
+  draft.triggerPrice = Number(triggerPrice.toFixed(2));
+
+  if (draft.expiryAt) {
+    const expiryAt = Date.parse(draft.expiryAt);
+    if (!Number.isFinite(expiryAt)) {
+      return 'Expiry is invalid.';
+    }
+
+    const expiryDistance = expiryAt - Date.now();
+    if (expiryDistance < ORCA_MIN_EXPIRY_MS || expiryDistance > ORCA_MAX_EXPIRY_MS) {
+      return `Expiry must be between ${formatIntervalLabel(ORCA_MIN_EXPIRY_MS)} and ${formatIntervalLabel(ORCA_MAX_EXPIRY_MS)} from now.`;
+    }
+  }
+
+  return null;
+}
+
+function getTelegramCommandName(text) {
+  const match = String(text || '').trim().match(/^\/([a-z0-9_]+)(?:@[a-z0-9_]+)?(?:\s|$)/i);
+  return match ? match[1].toLowerCase() : null;
+}
+
 async function routeFreeTextMessage(ctx, text, binding, session) {
+  if (containsSensitiveContent(text)) {
+    await ctx.reply(renderSensitiveInputMessage());
+    return;
+  }
+
+  const userId = getTelegramUserId(ctx);
   const localClassification = classifyFallbackMessage(text, { maxInputChars: GROQ_MAX_INPUT_CHARS });
 
-  if (localClassification?.action === 'info') {
-    await replyToInfoRequest(ctx, localClassification.infoKey);
+  if (localClassification?.action === 'command') {
+    await dispatchGroqAction(ctx, localClassification.command);
     return;
   }
 
   if (localClassification?.action === 'draft') {
-    await handleDraftMessage(ctx, session, binding, localClassification.normalizedCommand, localClassification.strategy);
+    await handleDraftMessage(ctx, session, binding, text);
     return;
   }
 
-  if (!allowGroqRequest()) {
+  if (!allowGroqRequest(userId)) {
     await ctx.reply(renderHelpMessage());
     return;
   }
@@ -2342,17 +2656,17 @@ async function routeFreeTextMessage(ctx, text, binding, session) {
   try {
     const classification = await groqClient.classifyMessage(text);
 
-    if (classification.action === 'info') {
-      await replyToInfoRequest(ctx, classification.infoKey);
+    if (classification.action === 'command') {
+      await dispatchGroqAction(ctx, classification.command);
       return;
     }
 
     if (classification.action === 'draft') {
-      await handleDraftMessage(ctx, session, binding, classification.normalizedCommand, classification.strategy);
+      await handleDraftMessage(ctx, session, binding, text);
       return;
     }
 
-    if (!allowGroqRequest()) {
+    if (!allowGroqRequest(userId)) {
       await ctx.reply(renderHelpMessage());
       return;
     }
@@ -2370,10 +2684,16 @@ async function routeFreeTextMessage(ctx, text, binding, session) {
   }
 }
 
-async function handleDraftMessage(ctx, session, binding, text, forcedStrategyKey = null) {
-  const draft = createDraftFromText(text, binding, forcedStrategyKey);
+async function handleDraftMessage(ctx, session, binding, text) {
+  const draft = createDraftFromText(text, binding);
+  const validationError = validateDraftForPreview(draft);
 
-  if (!draft.triggerPrice && !draft.recurring) {
+  if (validationError) {
+    await ctx.reply(validationError);
+    return;
+  }
+
+  if (!draft.recurring && (!Number.isFinite(draft.triggerPrice) || draft.triggerPrice <= 0)) {
     session.step = 'awaiting_trigger';
     session.draft = draft;
     session.updatedAt = nowIso();
@@ -2399,31 +2719,7 @@ async function handleDraftMessage(ctx, session, binding, text, forcedStrategyKey
 }
 
 async function replyToInfoRequest(ctx, infoKey) {
-  switch (infoKey) {
-    case 'help':
-      await ctx.reply(renderHelpMessage());
-      return;
-    case 'price':
-      await sendPriceCard(ctx, 1);
-      return;
-    case 'chart':
-      await sendPriceCard(ctx, 7);
-      return;
-    case 'list':
-      await ctx.reply(renderListMessage(ctx));
-      return;
-    case 'status':
-      await ctx.reply(renderStatusMessage(ctx));
-      return;
-    case 'positions':
-      await ctx.reply(renderPositionsMessage(ctx));
-      return;
-    case 'risk':
-      await ctx.reply(await renderRiskMessage(ctx));
-      return;
-    default:
-      await ctx.reply(renderHelpMessage());
-  }
+  return dispatchGroqAction(ctx, infoKey);
 }
 
 function renderPriceMessage() {
@@ -2459,7 +2755,7 @@ function renderStatusMessage(ctx) {
 }
 
 function getLiveIntentsForChat(chatId) {
-  return getIntentsForChat(chatId).filter((intent) => intent.status === 'active' || intent.status === 'executing');
+  return getIntentsForChat(chatId).filter((intent) => isLiveIntentStatus(intent.status));
 }
 
 function renderPositionsMessage(ctx) {
@@ -2606,7 +2902,7 @@ async function renderEditPrompt(ctx) {
 
   if (hasCurrentDraft) {
     lines.push('Current draft:');
-    lines.push(renderDraft(currentDraft));
+    lines.push(formatDraftMessage(currentDraft));
     lines.push('', 'Send a revised sentence to rebuild it.');
   } else if (hasLiveIntent) {
     lines.push('Current live rule:');
@@ -2662,7 +2958,7 @@ function renderStrategyTemplate(strategyKey, draft = createBlankDraft(strategyKe
   lines.push('', draft.recipientAddress
     ? `Verified wallet: ${shortAddress(draft.recipientAddress)}`
     : 'Connect and verify your X Layer wallet to finish this template.');
-  lines.push('Use /edit if you want to tweak the numbers, or /cancel to stop.');
+  lines.push('Use /edit if you want to tweak the numbers, or /cancel to stop. These templates schedule sponsored native OKB transfers, not swaps.');
   return lines.join('\n');
 }
 
@@ -2721,7 +3017,7 @@ function renderListMessage(ctx) {
     return ['No intents yet.', 'Use /new to create one.'].join('\n');
   }
 
-  const liveCount = intents.filter((intent) => intent.status === 'active' || intent.status === 'executing').length;
+  const liveCount = intents.filter((intent) => isLiveIntentStatus(intent.status)).length;
   const lines = [
     'Orca intents',
     `Live: ${liveCount} · Total: ${intents.length}`,
@@ -2749,7 +3045,7 @@ function getLatestLiveIntent(chatId) {
 
   for (let i = store.intents.length - 1; i >= 0; i -= 1) {
     const intent = store.intents[i];
-    if (intent.chatId === key && (intent.status === 'active' || intent.status === 'executing')) {
+    if (intent.chatId === key && isLiveIntentStatus(intent.status)) {
       return intent;
     }
   }
@@ -2905,7 +3201,7 @@ function getLiveIntentsForUser(userId) {
   const key = String(userId);
   return store.intents.filter((intent) => (
     String(intent.ownerTelegramUserId) === key
-      && (intent.status === 'active' || intent.status === 'executing')
+      && isLiveIntentStatus(intent.status)
   ));
 }
 
